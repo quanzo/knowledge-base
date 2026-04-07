@@ -191,6 +191,35 @@ final class FileStructIndexTest extends TestCase
     }
 
     /**
+     * Тест: поиск строки по номеру должен возвращать полную строку из TSV.
+     */
+    public function testFindLineByNumberReturnsLine(): void
+    {
+        $root = $this->makeTempDir('filestructindex-findline');
+        mkdir($root . '/dir space', 0777, true);
+        // Делаем много файлов, чтобы поиск работал не только по первой строке.
+        for ($i = 0; $i < 40; $i++) {
+            file_put_contents($root . '/dir space/файл-' . $i . '.txt', str_repeat('x', $i));
+        }
+
+        $structure = $root . '/structure.tsv';
+        (new FileStruct($root))->writeFile('.', $structure);
+
+        $index = FileStructIndex::fromStructureFile($root, $structure);
+
+        $line = $index->findLineByNumber(1);
+        self::assertNotNull($line);
+        self::assertStringStartsWith("1\t", (string) $line);
+
+        $line20 = $index->findLineByNumber(20);
+        self::assertNotNull($line20);
+        self::assertStringStartsWith("20\t", (string) $line20);
+
+        $missing = $index->findLineByNumber(99999);
+        self::assertNull($missing);
+    }
+
+    /**
      * Ожидает наступления следующей секунды, чтобы `filemtime()` гарантированно изменился.
      *
      * @return void

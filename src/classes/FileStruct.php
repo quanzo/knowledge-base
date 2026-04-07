@@ -176,8 +176,8 @@ final class FileStruct
             throw new FileStructException(sprintf('Failed to open output file %s: %s', $outFileName, $msg));
         }
 
-        $meta = stream_get_meta_data($fh);
-        $outPath = isset($meta['uri']) ? (string) $meta['uri'] : $outFileName;
+        $meta        = stream_get_meta_data($fh);
+        $outPath     = isset($meta['uri']) ? (string) $meta['uri'] : $outFileName;
         $outRealPath = realpath($outPath);
 
         $indexLineNo = 0;

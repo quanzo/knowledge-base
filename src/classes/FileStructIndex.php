@@ -36,6 +36,7 @@ use app\kb\classes\exceptions\FileStructFileMissingException;
 final class FileStructIndex
 {
     private string $rootDir;
+    private string $structureFilePath;
 
     /** @var array<string, FileStructEntry> */
     private array $entries = [];
@@ -44,9 +45,10 @@ final class FileStructIndex
      * @param string $rootDir Абсолютный путь к корню структуры.
      * @param array<string, FileStructEntry> $entries Индекс `relativePath -> entry`.
      */
-    private function __construct(string $rootDir, array $entries)
+    private function __construct(string $rootDir, string $structureFilePath, array $entries)
     {
         $this->rootDir = rtrim($rootDir, DIRECTORY_SEPARATOR);
+        $this->structureFilePath = $structureFilePath;
         $this->entries = $entries;
     }
 
@@ -121,7 +123,100 @@ final class FileStructIndex
             fclose($fh);
         }
 
-        return new self($realRoot, $entries);
+        return new self($realRoot, $realStructureFile, $entries);
+    }
+
+    /**
+     * Ищет строку в TSV-файле индекса по номеру строки из первой колонки (indexLineNo).
+     *
+     * Метод выполняет приближённый дихотомический поиск по байтовым оффсетам в файле:
+     * - оценивает среднюю длину строк по первой строке
+     * - прикидывает стартовый оффсет для искомого номера
+     * - читает окно данных и извлекает примерно 10 строк до и 10 строк после позиции
+     * - уточняет диапазон и повторяет до нахождения строки или исчерпания итераций
+     *
+     * Важно: файл индекса считается UTF-8. Поиск работает в байтах и никогда не возвращает
+     * обрезанные строки — только строки между символами `\\n`.
+     *
+     * @param int $indexLineNo Искомый номер строки (начиная с 1).
+     *
+     * @return string|null Полная строка TSV без символов перевода строки или null, если не найдена.
+     *
+     * @throws FileStructException Если индекс недоступен для чтения.
+     */
+    public function findLineByNumber(int $indexLineNo): ?string
+    {
+        if ($indexLineNo < 1) {
+            return null;
+        }
+
+        $file = $this->structureFilePath;
+        if (!is_file($file) || !is_readable($file)) {
+            throw new FileStructException(sprintf('Structure file is not readable: %s', $file));
+        }
+
+        $size = filesize($file);
+        if ($size === false || $size === 0) {
+            return null;
+        }
+
+        $fh = @fopen($file, 'rb');
+        if ($fh === false) {
+            $error = error_get_last();
+            $msg = $error !== null ? (string) $error['message'] : 'Unknown error';
+            throw new FileStructException(sprintf('Failed to open structure file %s: %s', $file, $msg));
+        }
+
+        try {
+            $firstLine = fgets($fh);
+            if ($firstLine === false) {
+                return null;
+            }
+
+            $avgLineBytes = max(1, strlen($firstLine));
+            $low = 0;
+            $high = (int) $size;
+
+            $guess = (int) min(max(0, ($indexLineNo - 1) * $avgLineBytes), max(0, $high - 1));
+
+            for ($i = 0; $i < 25; $i++) {
+                [$windowStart, $windowEnd, $lines] = $this->readWindowAroundOffset($fh, $guess, 10, 10);
+                if ($lines === []) {
+                    return null;
+                }
+
+                $minNo = $lines[0][0];
+                $maxNo = $lines[count($lines) - 1][0];
+
+                foreach ($lines as [$no, $line]) {
+                    if ($no === $indexLineNo) {
+                        return $line;
+                    }
+                }
+
+                if ($indexLineNo < $minNo) {
+                    $high = $windowStart;
+                } elseif ($indexLineNo > $maxNo) {
+                    $low = $windowEnd;
+                } else {
+                    // Номер должен быть внутри окна, но не найден: делаем небольшой сдвиг по оценке.
+                    $mid = $lines[(int) floor(count($lines) / 2)][0];
+                    $delta = $indexLineNo - $mid;
+                    $guess = (int) min(max(0, $guess + ($delta * $avgLineBytes)), max(0, $high - 1));
+                    continue;
+                }
+
+                if ($low >= $high) {
+                    break;
+                }
+
+                $guess = (int) floor(($low + $high) / 2);
+            }
+
+            return null;
+        } finally {
+            fclose($fh);
+        }
     }
 
     /**
@@ -316,8 +411,8 @@ final class FileStructIndex
                 continue;
             }
 
-            $sizeChanged = $leftEntry->getSizeBytes() !== $rightEntry->getSizeBytes();
-            $mtimeChanged = $leftEntry->getMtimeUnix() !== $rightEntry->getMtimeUnix();
+            $sizeChanged   = $leftEntry->getSizeBytes()          !== $rightEntry->getSizeBytes();
+            $mtimeChanged  = $leftEntry->getMtimeUnix()          !== $rightEntry->getMtimeUnix();
             $sha256Changed = strtolower($leftEntry->getSha256()) !== strtolower($rightEntry->getSha256());
 
             if ($sizeChanged || $mtimeChanged || $sha256Changed) {
@@ -342,6 +437,16 @@ final class FileStructIndex
     public function getRootDir(): string
     {
         return $this->rootDir;
+    }
+
+    /**
+     * Возвращает путь к TSV-файлу индекса.
+     *
+     * @return string
+     */
+    public function getStructureFilePath(): string
+    {
+        return $this->structureFilePath;
     }
 
     /**
@@ -469,5 +574,89 @@ final class FileStructIndex
     private static function makeEntryKey(string $relativePath): string
     {
         return 'p:' . $relativePath;
+    }
+
+    /**
+     * Читает окно вокруг байтового оффсета и возвращает строки с их indexLineNo.
+     *
+     * @param resource $fh Открытый файловый дескриптор (rb).
+     * @param int $offset Байтовый оффсет, вокруг которого читаем.
+     * @param int $before Количество строк до позиции (приблизительно).
+     * @param int $after Количество строк после позиции (приблизительно).
+     *
+     * @return array{0:int,1:int,2:array<int,array{0:int,1:string}>} [windowStart, windowEnd, lines]
+     */
+    private function readWindowAroundOffset($fh, int $offset, int $before, int $after): array
+    {
+        $chunkSize = 256 * 1024;
+        $half = (int) floor($chunkSize / 2);
+        $start = max(0, $offset - $half);
+
+        fseek($fh, $start);
+        $buf = fread($fh, $chunkSize);
+        if ($buf === false || $buf === '') {
+            return [$start, $start, []];
+        }
+
+        $end = $start + strlen($buf);
+
+        // Если окно не начинается с начала файла, отбрасываем обрывок первой строки.
+        if ($start > 0) {
+            $pos = strpos($buf, "\n");
+            if ($pos === false) {
+                return [$start, $end, []];
+            }
+            $buf = substr($buf, $pos + 1);
+            $start = $start + $pos + 1;
+        }
+
+        $rawLines = explode("\n", $buf);
+        // Последняя часть может быть обрывком, убираем её.
+        array_pop($rawLines);
+
+        $parsed = [];
+        foreach ($rawLines as $raw) {
+            $raw = rtrim($raw, "\r");
+            if ($raw === '') {
+                continue;
+            }
+
+            $no = $this->parseIndexLineNoFromLine($raw);
+            if ($no === null) {
+                continue;
+            }
+
+            $parsed[] = [$no, $raw];
+        }
+
+        if ($parsed === []) {
+            return [$start, $end, []];
+        }
+
+        usort($parsed, static fn (array $a, array $b): int => $a[0] <=> $b[0]);
+        return [$start, $end, $parsed];
+    }
+
+    /**
+     * Достаёт indexLineNo из строки TSV.
+     *
+     * @param string $line Полная строка без `\\n`.
+     *
+     * @return int|null
+     */
+    private function parseIndexLineNoFromLine(string $line): ?int
+    {
+        $pos = strpos($line, "\t");
+        if ($pos === false) {
+            return null;
+        }
+
+        $noStr = substr($line, 0, $pos);
+        if ($noStr === '' || preg_match('/^[0-9]+$/', $noStr) !== 1) {
+            return null;
+        }
+
+        $no = (int) $noStr;
+        return $no > 0 ? $no : null;
     }
 }
