@@ -1,0 +1,6 @@
+composer.lock
+vendor/*
+temp/*
+testapp/*
+*.phar
+*.code-workspace
