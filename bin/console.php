@@ -3,6 +3,11 @@
 require __DIR__ . '/../vendor/autoload.php';
 
 use app\kb\classes\command\HelloCommand;
+use app\kb\classes\command\CheckFileStructCommand;
+use app\kb\classes\command\DumpCommand;
+use app\kb\classes\command\FindDuplicatesCommand;
+use app\kb\classes\command\FindBySizeCommand;
+use app\kb\classes\command\DiffIndexCommand;
 use app\kb\classes\console\TimedConsoleApplication;
 
 define('APP_ID', 'kb');
@@ -53,6 +58,11 @@ $arDirs['APP_WORK_DIR'] = $workDir;
 
 // Регистрируем команды
 $app->add(new HelloCommand());
+$app->add(new DumpCommand());
+$app->add(new CheckFileStructCommand());
+$app->add(new FindDuplicatesCommand());
+$app->add(new FindBySizeCommand());
+$app->add(new DiffIndexCommand());
 
 // Можно также добавить встроенную команду list, которая уже есть в Symfony,
 // поэтому отдельная HelpCommand не требуется, но при желании можно добавить.
